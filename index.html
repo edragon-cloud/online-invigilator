@@ -16,6 +16,7 @@ body{font-family:Inter,sans-serif;-webkit-font-smoothing:antialiased}
 .pop{animation:pop .2s ease both}.live{animation:pulse 1.4s infinite}
 ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:3px}
 #sideDrawer{transition:transform .25s ease}#sideDrawer.closed{transform:translateX(-100%)}
+input[type="date"]{color-scheme:light}
 </style>
 </head>
 <body class="bg-slate-100 text-slate-900 text-[13px]">
@@ -54,6 +55,23 @@ const $   = id => document.getElementById(id);
 const esc = s  => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const clock = sec => { if(sec==null||sec==='') return '—'; sec=Math.max(0,+sec); return String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0'); };
 const ago = iso => { if(!iso) return '—'; const d=Math.round((Date.now()-new Date(iso).getTime())/1000); if(d<5)return 'vừa xong';if(d<60)return d+'s trước';if(d<3600)return Math.floor(d/60)+'p trước';return Math.floor(d/3600)+'h trước'; };
+
+/* ── Date helpers (store dd/mm/yyyy, HTML input needs yyyy-mm-dd) ── */
+const toHtmlDate = v => {
+  if(!v) return '';
+  v=String(v).trim();
+  if(v.includes('/')) { const p=v.split('/'); if(p.length===3) return `${p[2].padStart(4,'0')}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`; }
+  return v; // already yyyy-mm-dd or unknown
+};
+const fromHtmlDate = v => {
+  if(!v) return '';
+  v=String(v).trim();
+  if(v.includes('-')&&!v.includes('/')) { const p=v.split('-'); if(p.length===3) return `${p[2]}/${p[1]}/${p[0]}`; }
+  return v; // already dd/mm/yyyy
+};
+function dateInp(id, val='') {
+  return `<input id="${id}" type="date" class="w-full px-3 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 focus:outline-none text-sm" value="${esc(toHtmlDate(val))}">`;
+}
 function icons(){if(window.lucide)window.lucide.createIcons();}
 let _tt;
 function toast(msg,type){let el=$('_t');if(!el){el=document.createElement('div');el.id='_t';document.body.appendChild(el);}const bg=type==='err'?'bg-red-600':type==='warn'?'bg-amber-500':'bg-slate-900';el.className=`fixed bottom-6 left-1/2 -translate-x-1/2 ${bg} text-white px-5 py-2.5 rounded-xl text-sm font-semibold shadow-2xl z-[200] max-w-[92vw] transition-all duration-300`;el.textContent=msg;el.style.opacity='1';el.style.transform='translate(-50%,0)';clearTimeout(_tt);_tt=setTimeout(()=>{el.style.opacity='0';el.style.transform='translate(-50%,16px)';},3200);}
@@ -187,7 +205,7 @@ function stuDirectRegister(classCode){
       <div class="grid grid-cols-2 gap-3">
         <div class="col-span-2"><label class="block font-semibold mb-1 text-sm">Họ và tên *</label>${inp('_rn','text','Nguyễn Văn A')}</div>
         <div><label class="block font-semibold mb-1 text-sm">SBD / MSSV *</label>${inp('_rs','text','65666362')}</div>
-        <div><label class="block font-semibold mb-1 text-sm">Ngày sinh</label>${inp('_rd','text','01/01/2003')}</div>
+        <div><label class="block font-semibold mb-1 text-sm">Ngày sinh</label>${dateInp('_rd')}</div>
         <div class="col-span-2"><label class="block font-semibold mb-1 text-sm">Email *</label>${inp('_re','email','sv@email.com')}</div>
         <div class="col-span-2"><label class="block font-semibold mb-1 text-sm">Mật khẩu *</label>${inp('_rp2','password','Mật khẩu để đăng nhập lần sau')}</div>
       </div>
@@ -197,7 +215,7 @@ function stuDirectRegister(classCode){
   setTimeout(()=>$('_rn')?.focus(),80);
 }
 async function doDirectRegister(){
-  const fullName=$('_rn')?.value?.trim(),sbd=$('_rs')?.value?.trim(),dob=$('_rd')?.value?.trim()||'',email=$('_re')?.value?.trim(),password=$('_rp2')?.value?.trim();
+  const fullName=$('_rn')?.value?.trim(),sbd=$('_rs')?.value?.trim(),dob=fromHtmlDate($('_rd')?.value||''),email=$('_re')?.value?.trim(),password=$('_rp2')?.value?.trim();
   const classCode=($('_rc')?.value||'').trim();
   if(!fullName||!sbd||!email||!password)return toast('Điền đầy đủ thông tin (*)','err');
   try{
@@ -276,14 +294,64 @@ function classModal(){modal(`${mHead('Thêm lớp học')}<div class="p-5 space-
 async function createClass(){const n=($('_cn')||{}).value?.trim();if(!n)return toast('Nhập tên lớp','err');try{await api('createClass',{className:n,schoolYear:($('_cy')||{}).value?.trim()},true);closeModal();toast('Đã tạo lớp ✓');fetchDashboard();}catch(e){toast(e.message,'err');}}
 async function delClass(id,name){if(!confirm('Xoá lớp "'+name+'"?'))return;try{await api('deleteClass',{classId:id},true);toast('Đã xoá');fetchDashboard();}catch(e){toast(e.message,'err');}}
 function showQR(classId){const cls=T.classes.find(c=>c.classId===classId)||{};const code=cls.classCode||'';const joinUrl=encodeURIComponent(location.origin+location.pathname+'?join='+code);const qrUrl=`https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${joinUrl}&bgcolor=ffffff&color=0f172a&margin=2`;modal(`${mHead('QR Code Lớp học')}<div class="p-5 text-center space-y-3"><p class="text-sm font-semibold text-slate-700">${esc(cls.className)}</p><img src="${qrUrl}" alt="QR" class="mx-auto rounded-xl border border-slate-200 shadow" width="220" height="220" onerror="this.outerHTML='<p class=text-slate-400>Lỗi tải QR</p>'"><div class="bg-slate-50 rounded-xl p-3"><div class="text-[10px] font-bold text-slate-400 uppercase mb-1">Mã lớp</div><div class="font-mono font-bold text-2xl tracking-widest text-slate-800">${esc(code)}</div></div><button onclick="navigator.clipboard.writeText(decodeURIComponent('${joinUrl}')).then(()=>toast('Đã copy link ✓'))" class="px-4 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold">Copy link tham gia</button></div>${mFoot(mBtnSec('Đóng','closeModal()'))}`)}
-async function rosterModal(classId){const c=T.classes.find(x=>x.classId===classId)||{};modal(`${mHead(esc(c.className)+' · Danh sách SV')}<div class="p-5"><div class="flex flex-wrap gap-2 mb-4">${mBtn('<i data-lucide="user-plus" class="w-3.5 h-3.5 inline mr-1"></i>Thêm SV','addStuForm("'+classId+'")','flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold')}${mBtn('<i data-lucide="upload" class="w-3.5 h-3.5 inline mr-1"></i>Nhập loạt','bulkForm("'+classId+'")','flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold')}${mBtn('<i data-lucide="sheet" class="w-3.5 h-3.5 inline mr-1"></i>Google Sheet','importSheetModal("'+classId+'")','flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-lg text-xs font-semibold')}</div><div id="_sl" class="max-h-[50vh] overflow-auto"><div class="py-6 text-center text-slate-400">Đang tải…</div></div></div>`,true);await drawStudents(classId);}
+async function rosterModal(classId){
+  const c=T.classes.find(x=>x.classId===classId)||{};
+  const sheetSection=c.sheetId
+    ?`<div class="flex items-center gap-2 p-3 bg-emerald-50 rounded-xl border border-emerald-200 mb-3">
+        <i data-lucide="sheet" class="w-4 h-4 text-emerald-600 shrink-0"></i>
+        <div class="flex-1 min-w-0 text-xs"><b class="text-emerald-700">File Sheet đã liên kết.</b><br><span class="text-emerald-600">Điền SV vào sheet rồi bấm Đồng bộ.</span></div>
+        <a href="${esc(c.sheetUrl)}" target="_blank" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold whitespace-nowrap">Mở Sheet ↗</a>
+        <button onclick="syncSheet('${classId}')" class="px-3 py-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-lg text-xs font-bold whitespace-nowrap">↻ Đồng bộ</button>
+      </div>`
+    :`<div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-200 border-dashed mb-3">
+        <i data-lucide="sheet" class="w-4 h-4 text-slate-400 shrink-0"></i>
+        <div class="flex-1 min-w-0 text-xs text-slate-500">Tạo file Google Sheet để nhập SV hàng loạt. Format: <span class="font-mono">${esc(c.schoolYear||'NA')}_${esc(c.className)}_ngày-tạo</span></div>
+        <button onclick="doCreateClassSheet('${classId}')" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold whitespace-nowrap">Tạo file Sheet</button>
+      </div>`;
+  modal(`${mHead(esc(c.className)+' · Danh sách SV')}
+    <div class="p-5">
+      ${sheetSection}
+      <div class="flex flex-wrap gap-2 mb-3">
+        ${mBtn('<i data-lucide="user-plus" class="w-3.5 h-3.5 inline mr-1"></i>Thêm SV','addStuForm("'+classId+'")','flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold')}
+        ${mBtn('<i data-lucide="upload" class="w-3.5 h-3.5 inline mr-1"></i>Nhập loạt','bulkForm("'+classId+'")','flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold')}
+      </div>
+      <div id="_sl" class="max-h-[45vh] overflow-auto"><div class="py-6 text-center text-slate-400">Đang tải…</div></div>
+    </div>`,true);
+  await drawStudents(classId);
+}
 async function drawStudents(classId){const h=$('_sl');if(!h)return;try{const list=await api('listStudents',{classId},true);if(!list.length){h.innerHTML='<div class="py-8 text-center text-slate-400">Chưa có sinh viên.</div>';return;}h.innerHTML=`<table class="w-full text-xs"><thead><tr class="text-[10px] uppercase text-slate-400 border-b border-slate-200"><th class="py-2 text-left">#</th><th class="text-left">Họ tên</th><th class="text-left">SBD</th><th class="text-left">Email</th><th class="text-left">TT</th><th></th></tr></thead><tbody>${list.map((s,i)=>`<tr class="border-b border-slate-50 hover:bg-slate-50"><td class="py-2 text-slate-400">${i+1}</td><td class="font-semibold text-slate-700">${esc(s.fullName)}</td><td class="font-mono">${esc(s.sbd||'—')}</td><td class="text-slate-400 text-[10px]">${esc(s.email||'—')}</td><td>${s.status==='active'?'<span class="text-emerald-600 font-semibold">Hoạt động</span>':'<span class="text-amber-500 font-semibold">Chờ duyệt</span>'}</td><td class="text-right flex items-center gap-1 justify-end py-2">${s.status==='pending'?`<button onclick="approveStu('${s.studentId}','${classId}')" class="text-emerald-600 hover:underline font-semibold">Duyệt</button>`:''}<button onclick="delStu('${s.studentId}','${classId}')" class="text-slate-300 hover:text-red-500 ml-1"><i data-lucide="trash-2" class="w-4 h-4"></i></button></td></tr>`).join('')}</tbody></table>`;icons();}catch(e){h.innerHTML=`<div class="py-8 text-center text-red-500">${esc(e.message)}</div>`;}}
 async function approveStu(studentId,classId){try{await api('approvePending',{studentId},true);toast('Đã duyệt ✓');drawStudents(classId);}catch(e){toast(e.message,'err');}}
 async function delStu(id,classId){if(!confirm('Xoá SV này?'))return;try{await api('deleteStudent',{studentId:id},true);drawStudents(classId);}catch(e){toast(e.message,'err');}}
-function addStuForm(classId){modal(`${mHead('Thêm sinh viên','rosterModal("'+classId+'")')}<div class="p-5 space-y-3"><div><label class="block font-semibold mb-1 text-sm">Họ tên *</label>${inp('_sn','text','')}</div><div class="grid grid-cols-2 gap-3"><div><label class="block font-semibold mb-1 text-sm">SBD</label>${inp('_ss','text','')}</div><div><label class="block font-semibold mb-1 text-sm">Ngày sinh</label>${inp('_sd','text','01/01/2003')}</div></div></div>${mFoot(mBtnSec('Quay lại','rosterModal("'+classId+'")'),mBtn('Lưu','saveStu("'+classId+'")'))}`)}
-async function saveStu(classId){const n=($('_sn')||{}).value?.trim();if(!n)return toast('Nhập họ tên','err');try{await api('addStudent',{classId,fullName:n,sbd:$('_ss')?.value?.trim()||'',dob:$('_sd')?.value?.trim()||''},true);toast('Đã thêm ✓');rosterModal(classId);}catch(e){toast(e.message,'err');}}
+function addStuForm(classId){modal(`${mHead('Thêm sinh viên','rosterModal("'+classId+'")')}<div class="p-5 space-y-3"><div><label class="block font-semibold mb-1 text-sm">Họ tên *</label>${inp('_sn','text','')}</div><div class="grid grid-cols-2 gap-3"><div><label class="block font-semibold mb-1 text-sm">SBD</label>${inp('_ss','text','')}</div><div><label class="block font-semibold mb-1 text-sm">Ngày sinh</label>${dateInp('_sd')}</div></div></div>${mFoot(mBtnSec('Quay lại','rosterModal("'+classId+'")'),mBtn('Lưu','saveStu("'+classId+'")'))}`)}
+async function saveStu(classId){const n=($('_sn')||{}).value?.trim();if(!n)return toast('Nhập họ tên','err');try{await api('addStudent',{classId,fullName:n,sbd:$('_ss')?.value?.trim()||'',dob:fromHtmlDate($('_sd')?.value||'')},true);toast('Đã thêm ✓');rosterModal(classId);}catch(e){toast(e.message,'err');}}
 function bulkForm(classId){modal(`${mHead('Nhập hàng loạt','rosterModal("'+classId+'")')}<div class="p-5 space-y-2"><p class="text-xs text-slate-500">Mỗi dòng 1 SV. Cột cách bằng <b>Tab</b> hoặc phẩy: Họ tên → SBD → SĐT → Email → Ngày sinh</p><textarea id="_bl" class="w-full px-3 py-2 border border-slate-200 rounded-xl font-mono text-xs h-40 focus:ring-2 focus:ring-indigo-200 focus:outline-none" placeholder="Nguyễn Văn A	65666362	0901234567		01/01/2003"></textarea></div>${mFoot(mBtnSec('Quay lại','rosterModal("'+classId+'")'),mBtn('Nhập','saveBulk("'+classId+'")'))}`)}
 async function saveBulk(classId){const txt=($('_bl')||{}).value?.trim();if(!txt)return toast('Chưa có dữ liệu','err');const rows=txt.split(/\r?\n/).map(l=>l.split(/\t|,/).map(c=>c.trim())).filter(r=>r[0]);try{const r=await api('addStudentsBulk',{classId,rows},true);toast(`Đã thêm ${r.added}, kích hoạt ${r.activated} SV ✓`);rosterModal(classId);}catch(e){toast(e.message,'err');}}
+
+async function doCreateClassSheet(classId){
+  const btn=event?.target; if(btn){btn.textContent='Đang tạo…';btn.disabled=true;}
+  try{
+    const r=await api('createClassSheet',{classId},true);
+    // Update local class cache
+    const cls=T.classes.find(c=>c.classId===classId);
+    if(cls){cls.sheetId=r.sheetId;cls.sheetUrl=r.sheetUrl;}
+    if(r.existing) toast('File Sheet đã tồn tại ✓');
+    else toast('Đã tạo file Sheet ✓ Nhấn "Mở Sheet" để điền SV.');
+    rosterModal(classId);
+  }catch(e){toast(e.message,'err');if(btn){btn.textContent='Tạo file Sheet';btn.disabled=false;}}
+}
+
+async function syncSheet(classId){
+  const btn=event?.target; if(btn){btn.textContent='Đang đồng bộ…';btn.disabled=true;}
+  try{
+    const r=await api('syncFromSheet',{classId},true);
+    const msg=r.total===0?'Sheet chưa có dữ liệu':`Đồng bộ xong: thêm ${r.added}, kích hoạt ${r.activated}/${r.total} SV ✓`;
+    toast(msg,r.total===0?'warn':undefined);
+    // Refresh counts
+    T.classes=await api('listClasses',{},true);
+    await drawStudents(classId);
+    if(btn){btn.textContent='↻ Đồng bộ';btn.disabled=false;}
+  }catch(e){toast(e.message,'err');if(btn){btn.textContent='↻ Đồng bộ';btn.disabled=false;}}
+}
 function importSheetModal(classId){modal(`${mHead('Import từ Google Sheets','rosterModal("'+classId+'")')}<div class="p-5 space-y-3"><div class="p-3 bg-blue-50 rounded-xl text-xs text-blue-700"><b>Yêu cầu:</b> Sheet phải chia sẻ "Anyone with link can view". Hàng đầu là tiêu đề (Họ tên, MSSV, Ngày sinh,...).</div><div><label class="block font-semibold mb-1 text-sm">ID hoặc URL Google Sheet</label>${inp('_sid','text','1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms')}</div></div>${mFoot(mBtnSec('Quay lại','rosterModal("'+classId+'")'),mBtn('Đọc Sheet','fetchSheet("'+classId+'")'))}`)}
 async function fetchSheet(classId){const sid=($('_sid')||{}).value?.trim();if(!sid)return toast('Nhập Sheet ID','err');toast('Đang đọc sheet…');try{const r=await api('importFromSheet',{sheetId:sid},true);modal(`${mHead('Xem trước dữ liệu import')}<div class="p-5"><p class="text-sm text-slate-600 mb-3">Tìm thấy <b>${r.total}</b> sinh viên:</p><div class="border border-slate-200 rounded-xl overflow-auto max-h-64"><table class="w-full text-xs"><thead><tr class="text-[10px] uppercase text-slate-400 bg-slate-50 border-b"><th class="px-3 py-2 text-left">Họ tên</th><th class="text-left">SBD</th><th class="text-left">Ngày sinh</th><th class="text-left">Email</th></tr></thead><tbody>${r.data.slice(0,20).map(s=>`<tr class="border-b border-slate-50"><td class="px-3 py-1.5">${esc(s.fullName)}</td><td class="font-mono">${esc(s.sbd)}</td><td>${esc(s.dob)}</td><td class="text-slate-400">${esc(s.email)}</td></tr>`).join('')}${r.total>20?`<tr><td colspan="4" class="px-3 py-2 text-slate-400 italic">…và ${r.total-20} SV nữa</td></tr>`:''}</tbody></table></div></div>${mFoot(mBtnSec('Huỷ','closeModal()'),mBtn('Nhập '+r.total+' SV','confirmImport("'+classId+'")','bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl text-xs font-bold'))}`,true);window._importData=r.data;window._importClassId=classId;}catch(e){toast(e.message,'err');}}
 async function confirmImport(classId){const data=window._importData||[];if(!data.length)return;const rows=data.map(s=>[s.fullName,s.sbd,s.phone||'',s.email,s.dob]);try{const r=await api('addStudentsBulk',{classId,rows},true);closeModal();toast(`Đã nhập ${r.added}, kích hoạt ${r.activated} SV ✓`);rosterModal(classId);}catch(e){toast(e.message,'err');}}
@@ -396,7 +464,7 @@ function stuSettingsModal(){
       <p class="text-xs text-slate-500">Chỉnh sửa thông tin cá nhân. Để đổi mật khẩu, điền đầy đủ mục bên dưới.</p>
       <div><label class="block font-semibold mb-1 text-sm">Họ tên</label>${inp('_pn','text','Họ và tên',sess.fullName||'')}</div>
       <div class="grid grid-cols-2 gap-3">
-        <div><label class="block font-semibold mb-1 text-sm">Ngày sinh</label>${inp('_pd','text','DD/MM/YYYY',sess.dob||'')}</div>
+        <div><label class="block font-semibold mb-1 text-sm">Ngày sinh</label>${dateInp('_pd', sess.dob||'')}</div>
         <div><label class="block font-semibold mb-1 text-sm">SĐT</label>${inp('_pp','tel','SĐT',sess.phone||'')}</div>
       </div>
       <hr class="border-slate-100">
@@ -408,7 +476,7 @@ function stuSettingsModal(){
 async function doUpdateProfile(){
   const sess=getSession();if(!sess)return;
   const fullName=($('_pn')||{}).value?.trim();
-  const dob=($('_pd')||{}).value?.trim()||'';
+  const dob=fromHtmlDate(($('_pd')||{}).value||'');
   const phone=($('_pp')||{}).value?.trim()||'';
   const currentPassword=($('_pc')||{}).value?.trim();
   const newPassword=($('_pnew')||{}).value?.trim();
@@ -435,7 +503,7 @@ function stuRegisterView(classCode){
         <div><label class="block text-sm font-semibold mb-1">Họ tên *</label>${inp('_rn','text','Nguyễn Văn A')}</div>
         <div class="grid grid-cols-2 gap-3">
           <div><label class="block text-sm font-semibold mb-1">SBD/MSSV *</label>${inp('_rs','text','65666362')}</div>
-          <div><label class="block text-sm font-semibold mb-1">Ngày sinh</label>${inp('_rd','text','01/01/2003')}</div>
+          <div><label class="block text-sm font-semibold mb-1">Ngày sinh</label>${dateInp('_rd')}</div>
         </div>
         <div><label class="block text-sm font-semibold mb-1">Email *</label>${inp('_re','email','sv@email.com')}</div>
         <div><label class="block text-sm font-semibold mb-1">Mật khẩu *</label>${inp('_rp2','password','Để đăng nhập lần sau')}</div>
@@ -448,7 +516,7 @@ function stuRegisterView(classCode){
 }
 async function doRegisterQR(classCode){
   if(!getUrl()){toast('Chưa cấu hình backend','err');return;}
-  const fullName=$('_rn')?.value?.trim(),sbd=$('_rs')?.value?.trim(),dob=$('_rd')?.value?.trim()||'',email=$('_re')?.value?.trim(),password=$('_rp2')?.value?.trim();
+  const fullName=$('_rn')?.value?.trim(),sbd=$('_rs')?.value?.trim(),dob=fromHtmlDate($('_rd')?.value||''),email=$('_re')?.value?.trim(),password=$('_rp2')?.value?.trim();
   if(!fullName||!sbd||!email||!password)return toast('Điền đầy đủ (*)','err');
   try{const r=await api('studentRegister',{classCode,fullName,sbd,dob,email,password});setSession({role:'student',...r});if(r.status==='active'){toast('Đăng ký thành công!');stuPortal();}else stuPendingPage(r);}
   catch(e){toast(e.message,'err');}
