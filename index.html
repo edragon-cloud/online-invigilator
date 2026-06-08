@@ -142,7 +142,7 @@ function loginPage(){
 function teacherLoginForm(){
   modal(`${mHead('Đăng nhập Giáo viên')}
     <div class="p-5 space-y-3">
-      <div class="flex items-center gap-3 p-3 bg-indigo-50 rounded-xl"><i data-lucide="shield" class="w-5 h-5 text-indigo-600 shrink-0"></i><p class="text-xs text-indigo-700">Nhập mật khẩu giáo viên (đặt trong Code.gs → ADMIN_TOKEN)</p></div>
+      <div class="flex items-center gap-3 p-3 bg-indigo-50 rounded-xl"><i data-lucide="shield" class="w-5 h-5 text-indigo-600 shrink-0"></i><p class="text-xs text-indigo-700">Nhập mật khẩu</p></div>
       <div><label class="block font-semibold mb-1 text-sm">Mật khẩu</label>${inp('_tp','password','Mật khẩu giáo viên…')}</div>
     </div>${mFoot(mBtnSec('Huỷ','closeModal()'),mBtn('Đăng nhập','doTeacherLogin()'))}`);
   setTimeout(()=>$('_tp')?.focus(),80);
