@@ -1,0 +1,857 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Exam Hub</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={theme:{extend:{fontFamily:{sans:['Inter','ui-sans-serif','sans-serif'],mono:['"JetBrains Mono"','monospace']}}}}</script>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+body{font-family:Inter,sans-serif}
+@keyframes pop{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-4px)}75%{transform:translateX(4px)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.pop{animation:pop .18s ease both}
+.live{animation:pulse 1.4s infinite}
+::-webkit-scrollbar{width:7px;height:7px}
+::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:4px}
+</style>
+</head>
+<body class="bg-slate-100 text-slate-900 text-[13px] font-sans">
+<div id="app" class="min-h-screen"></div>
+
+<script>
+/* =====================================================================
+   EXAM HUB — Single-file SPA  (Code.gs + index.html only)
+   Student view : index.html?exam=CODE
+   Teacher view : index.html  (no ?exam param)
+   ===================================================================== */
+
+// ─── CONFIG (paste your GAS /exec URL here before deploying) ───────────
+const BACKEND_URL = "";   // e.g. https://script.google.com/macros/s/AKfyc.../exec
+// ───────────────────────────────────────────────────────────────────────
+
+/* ── Stored config ── */
+const getUrl   = () => localStorage.getItem('eh_url') || BACKEND_URL;
+const getToken = () => localStorage.getItem('eh_tok') || '';
+const saveCfg  = (u,t) => { localStorage.setItem('eh_url',u); localStorage.setItem('eh_tok',t); };
+
+/* ── API (text/plain avoids CORS preflight) ── */
+async function api(action, payload={}, teacher=false) {
+  const url = getUrl();
+  if (!url) throw new Error('Chưa cấu hình URL backend. Bấm "Kết nối backend" ở sidebar.');
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action, token: teacher ? getToken() : undefined, payload })
+  });
+  const j = await res.json();
+  if (!j.ok) throw new Error(j.error || 'Lỗi backend');
+  return j.data;
+}
+
+/* ── DOM helpers ── */
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const clock = sec => { if (sec == null || sec === '') return '—'; sec = Math.max(0, +sec); return String(Math.floor(sec/60)).padStart(2,'0') + ':' + String(sec%60).padStart(2,'0'); };
+const ago = iso => { if (!iso) return '—'; const d = Math.round((Date.now() - new Date(iso).getTime())/1000); if (d<5) return 'vừa xong'; if (d<60) return d+' giây trước'; if (d<3600) return Math.floor(d/60)+' phút trước'; return Math.floor(d/3600)+' giờ trước'; };
+function icons() { if (window.lucide) window.lucide.createIcons(); }
+
+let _toastT;
+function toast(msg, type) {
+  let el = $('_t'); if (!el) { el = document.createElement('div'); el.id='_t'; document.body.appendChild(el); }
+  const bg = type==='err' ? 'bg-red-600' : type==='warn' ? 'bg-amber-500' : 'bg-slate-900';
+  el.className = `fixed bottom-6 left-1/2 -translate-x-1/2 ${bg} text-white px-5 py-2.5 rounded-lg text-sm font-medium shadow-2xl z-[100] max-w-[92vw] transition-all duration-300`;
+  el.textContent = msg; el.style.opacity='1'; el.style.transform='translate(-50%,0)';
+  clearTimeout(_toastT); _toastT = setTimeout(() => { el.style.opacity='0'; el.style.transform='translate(-50%,16px)'; }, 2900);
+}
+function modal(html, wide) {
+  let o = $('_ov'); if (!o) { o = document.createElement('div'); o.id='_ov'; document.body.appendChild(o); o.addEventListener('click', e => { if (e.target===o) closeModal(); }); }
+  o.className = 'fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-start justify-center z-50 p-4 sm:p-8 overflow-auto';
+  o.innerHTML = `<div class="bg-white rounded-xl border border-slate-200 shadow-2xl w-full ${wide?'max-w-3xl':'max-w-lg'} pop">${html}</div>`;
+  icons();
+}
+function closeModal() { const o = $('_ov'); if (o) o.remove(); }
+
+/* ── Global state ── */
+const T = { tab:'dashboard', classes:[], exams:[] };
+const Room = { examId:null, data:null, polling:true };
+let pollInt=null, tickInt=null;
+
+/* ── Student state ── */
+const S = { exam:null, subId:null, answers:{}, deadline:0, dur:0 };
+let timerInt=null, saveT=null, saveInt=null;
+
+/* ── Monitor ── */
+const M = { on:false, paused:false, count:0, last:0 };
+
+/* =====================================================================
+   BOOT — route by ?exam param
+   ===================================================================== */
+function boot() {
+  const p = new URLSearchParams(location.search);
+  const examParam = p.get('exam'); // null=no param, ''=empty, 'CODE'=has code
+  if (examParam !== null) { stuView(examParam); return; }
+  teacherBoot();
+}
+
+/* =====================================================================
+   SETTINGS MODAL
+   ===================================================================== */
+function settingsModal(onSaved) {
+  modal(`
+    <div class="px-5 py-4 border-b border-slate-100 flex justify-between items-center">
+      <h3 class="font-bold text-base">Kết nối backend</h3>
+      <button onclick="closeModal()" class="text-slate-400 hover:text-slate-700 text-xl leading-none">×</button>
+    </div>
+    <div class="p-5 space-y-3">
+      <p class="text-slate-500">Nhập URL GAS Web app và admin token đã đặt trong <code>Code.gs</code>.</p>
+      <div>
+        <label class="block font-semibold mb-1">GAS Web app URL ${BACKEND_URL?'<span class="text-emerald-600 font-normal">(đã có sẵn trong file)</span>':''}</label>
+        <input id="_u" class="w-full px-3 py-2 border border-slate-200 rounded-md font-mono text-xs focus:ring-1 focus:ring-indigo-500 focus:outline-none" placeholder="https://script.google.com/macros/s/.../exec" value="${esc(getUrl())}">
+      </div>
+      <div>
+        <label class="block font-semibold mb-1">Admin token</label>
+        <input id="_k" type="password" class="w-full px-3 py-2 border border-slate-200 rounded-md font-mono text-xs focus:ring-1 focus:ring-indigo-500 focus:outline-none" value="${esc(getToken())}">
+      </div>
+    </div>
+    <div class="px-5 py-3.5 border-t border-slate-100 flex justify-end gap-2">
+      <button onclick="closeModal()" class="px-3.5 py-2 border border-slate-200 rounded-md text-xs hover:bg-slate-50">Huỷ</button>
+      <button id="_sv" class="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md text-xs font-bold">Lưu &amp; kiểm tra</button>
+    </div>`);
+  $('_sv').onclick = async () => {
+    saveCfg($('_u').value.trim(), $('_k').value.trim());
+    try { await api('ping'); toast('Kết nối thành công ✓'); closeModal(); if (onSaved) onSaved(); }
+    catch (e) { toast('Lỗi kết nối: ' + e.message, 'err'); }
+  };
+}
+
+/* =====================================================================
+   TEACHER — SHELL
+   ===================================================================== */
+function teacherBoot() {
+  if (!getUrl() || !getToken()) { settingsModal(teacherBoot); return; }
+  api('ping').then(() => renderTeacher(T.tab)).catch(() => settingsModal(teacherBoot));
+}
+
+function renderTeacher(tab) {
+  clearInterval(pollInt); clearInterval(tickInt);
+  T.tab = tab;
+  $('app').innerHTML = `<div class="flex min-h-screen">${sidebar(tab)}<main class="flex-1 min-w-0" id="main"></main></div>`;
+  icons();
+  if (tab==='dashboard') loadDashboard();
+  else if (tab==='create')  loadCreate();
+  else if (tab==='room')    loadRoom();
+}
+
+function sidebar(active) {
+  const navItem = (id, icon, label) => `
+    <a href="#" onclick="renderTeacher('${id}');return false" class="flex items-center gap-3 px-3 py-2 rounded-md font-medium transition-all ${
+      active===id ? 'bg-indigo-600/15 text-indigo-300 font-semibold border-l-2 border-indigo-500 rounded-l-none'
+                  : 'text-slate-400 hover:bg-slate-800/60 hover:text-slate-200'}">
+      <i data-lucide="${icon}" class="w-4 h-4 text-indigo-400"></i><span>${label}</span>
+    </a>`;
+  return `
+  <aside class="w-60 bg-[#0F172A] text-slate-300 flex flex-col min-h-screen sticky top-0 select-none shrink-0">
+    <div class="p-5 flex items-center gap-3 border-b border-slate-800">
+      <div class="w-8 h-8 bg-indigo-500 rounded flex items-center justify-center text-white font-bold text-sm shadow-md shadow-indigo-500/30">EH</div>
+      <div><span class="font-semibold text-base text-white block">Exam Hub</span>
+        <span class="text-[10px] text-indigo-400 tracking-wider uppercase">GAS · GitHub Pages</span></div>
+    </div>
+    <nav class="flex-1 px-3 py-4 space-y-1">
+      <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 px-3">Quản lý &amp; Giám sát</div>
+      ${navItem('dashboard','layout-dashboard','Bàn làm việc')}
+      ${navItem('create','file-plus-2','Tạo đề thi')}
+      ${navItem('room','monitor-dot','Quản lý phòng thi')}
+    </nav>
+    <div class="p-3 border-t border-slate-800 space-y-1">
+      <button onclick="settingsModal(()=>renderTeacher(T.tab))" class="w-full flex items-center gap-2 px-3 py-2 rounded-md text-slate-400 hover:bg-slate-800/60 text-[13px]">
+        <i data-lucide="settings" class="w-4 h-4"></i><span>Kết nối backend</span>
+      </button>
+      <button onclick="openStudentPage()" class="w-full flex items-center gap-2 px-3 py-2 rounded-md text-slate-400 hover:bg-slate-800/60 text-[13px]">
+        <i data-lucide="external-link" class="w-4 h-4"></i><span>Mở trang SV</span>
+      </button>
+    </div>
+  </aside>`;
+}
+
+function openStudentPage() {
+  const c = prompt('Nhập mã đề để mở trang sinh viên:');
+  if (c) window.open(location.pathname + '?exam=' + c.trim(), '_blank');
+}
+
+/* ── Shared card UI ── */
+function statCard(icon, label, val, col) {
+  return `<div class="bg-white rounded-xl border border-slate-200 p-4">
+    <div class="flex items-center justify-between mb-1"><span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">${label}</span><i data-lucide="${icon}" class="w-4 h-4 ${col}"></i></div>
+    <div class="text-2xl font-extrabold font-mono text-slate-800">${val}</div></div>`;
+}
+
+/* =====================================================================
+   TAB: DASHBOARD
+   ===================================================================== */
+function loadDashboard() {
+  $('main').innerHTML = `
+    <header class="bg-white border-b border-slate-200 px-7 py-4 sticky top-0 z-10">
+      <h1 class="text-lg font-bold text-slate-800">Bàn làm việc</h1>
+      <p class="text-slate-400 text-xs">Tổng quan lớp học, đề thi và sinh viên</p>
+    </header>
+    <div class="p-7 space-y-6">
+      <div id="stats" class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div class="col-span-full text-slate-400 text-center py-4">Đang tải…</div>
+      </div>
+      <div class="grid lg:grid-cols-5 gap-6">
+        <section class="lg:col-span-3">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="font-bold text-slate-800 text-[15px]">Lớp học</h2>
+            <button onclick="classModal()" class="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md text-xs font-bold shadow-sm">
+              <i data-lucide="plus" class="w-3.5 h-3.5"></i>Thêm lớp
+            </button>
+          </div>
+          <div id="classGrid"></div>
+        </section>
+        <section class="lg:col-span-2">
+          <h2 class="font-bold text-slate-800 text-[15px] mb-3">Đề thi gần đây</h2>
+          <div id="examBox" class="bg-white rounded-xl border border-slate-200"></div>
+        </section>
+      </div>
+    </div>`;
+  icons(); fetchDashboard();
+}
+
+async function fetchDashboard() {
+  try {
+    [T.classes, T.exams] = await Promise.all([api('listClasses',{},true), api('listExams',{},true)]);
+    const totalStu = T.classes.reduce((a,c)=>a+(+c.size||0),0);
+    const totalSubs = T.exams.reduce((a,e)=>a+(+e.submitted||0),0);
+    $('stats').innerHTML =
+      statCard('building','Lớp học',T.classes.length,'text-indigo-500') +
+      statCard('users','Sinh viên',totalStu,'text-sky-500') +
+      statCard('file-text','Đề thi',T.exams.length,'text-emerald-500') +
+      statCard('check-check','Lượt đã nộp',totalSubs,'text-amber-500');
+    renderClassGrid(); renderExamList(); icons();
+  } catch(e) { toast(e.message,'err'); }
+}
+
+function renderClassGrid() {
+  const g = $('classGrid');
+  if (!T.classes.length) { g.innerHTML=`<div class="col-span-full text-center py-10 text-slate-400 bg-white rounded-xl border border-dashed border-slate-300">Chưa có lớp. Bấm "Thêm lớp".</div>`; return; }
+  g.innerHTML = `<div class="grid sm:grid-cols-2 gap-3">${T.classes.map(c=>`
+    <div class="bg-white rounded-xl border border-slate-200 p-4 hover:border-indigo-300 hover:shadow-md transition cursor-pointer" onclick="rosterModal('${c.classId}')">
+      <div class="flex items-start justify-between">
+        <div><h3 class="font-bold text-slate-800 leading-tight">${esc(c.className)}</h3><p class="text-slate-400 text-xs mt-0.5">${esc(c.schoolYear||'—')}</p></div>
+        <button onclick="event.stopPropagation();delClass('${c.classId}','${esc(c.className)}')" class="text-slate-300 hover:text-red-500"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+      </div>
+      <div class="mt-3 flex items-center gap-1.5 text-xs text-slate-500"><i data-lucide="users" class="w-3.5 h-3.5"></i>Sĩ số: <b class="text-slate-700">${c.size||0}</b></div>
+    </div>`).join('')}</div>`;
+}
+
+function renderExamList() {
+  const b = $('examBox');
+  if (!T.exams.length) { b.innerHTML='<div class="text-center py-10 text-slate-400">Chưa có đề thi.</div>'; return; }
+  b.innerHTML = `<div class="divide-y divide-slate-100">${T.exams.slice(0,8).map(e=>`
+    <div class="flex items-center gap-3 px-4 py-3">
+      <div class="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center shrink-0"><i data-lucide="file-text" class="w-4 h-4 text-indigo-500"></i></div>
+      <div class="min-w-0 flex-1">
+        <div class="font-semibold text-slate-700 truncate">${esc(e.examName)}</div>
+        <div class="text-[11px] text-slate-400">${esc(e.className||'tự do')} · ${e.questionCount} câu · ${e.submitted} đã nộp</div>
+      </div>
+      <span class="font-mono text-[11px] bg-slate-800 text-white px-2 py-0.5 rounded">${esc(e.examCode)}</span>
+    </div>`).join('')}
+  </div><a href="#" onclick="renderTeacher('create');return false" class="block text-center py-2.5 text-xs font-bold text-indigo-600 hover:bg-indigo-50 border-t border-slate-100">+ Tạo đề mới</a>`;
+}
+
+/* class CRUD */
+function classModal() {
+  modal(`
+    <div class="px-5 py-4 border-b border-slate-100 flex justify-between items-center"><h3 class="font-bold text-base">Thêm lớp</h3><button onclick="closeModal()" class="text-slate-400 text-xl">×</button></div>
+    <div class="p-5 space-y-3">
+      <div><label class="block font-semibold mb-1">Tên lớp *</label><input id="_cn" class="w-full px-3 py-2 border border-slate-200 rounded-md focus:ring-1 focus:ring-indigo-500 focus:outline-none" placeholder="DH13NNA-A · Reading Skills"></div>
+      <div><label class="block font-semibold mb-1">Năm học</label><input id="_cy" class="w-full px-3 py-2 border border-slate-200 rounded-md focus:ring-1 focus:ring-indigo-500 focus:outline-none" placeholder="2025 – 2026"></div>
+    </div>
+    <div class="px-5 py-3.5 border-t border-slate-100 flex justify-end gap-2">
+      <button onclick="closeModal()" class="px-3.5 py-2 border border-slate-200 rounded-md text-xs">Huỷ</button>
+      <button onclick="createClass()" class="px-3.5 py-2 bg-indigo-600 text-white rounded-md text-xs font-bold">Tạo lớp</button>
+    </div>`);
+}
+async function createClass() {
+  const n=$('_cn').value.trim(); if(!n) return toast('Nhập tên lớp','err');
+  try { await api('createClass',{className:n,schoolYear:$('_cy').value.trim()},true); closeModal(); toast('Đã tạo lớp ✓'); fetchDashboard(); } catch(e){toast(e.message,'err');}
+}
+async function delClass(id,name) {
+  if(!confirm('Xoá lớp "'+name+'" và toàn bộ sinh viên?')) return;
+  try { await api('deleteClass',{classId:id},true); toast('Đã xoá'); fetchDashboard(); } catch(e){toast(e.message,'err');}
+}
+
+/* roster modal */
+async function rosterModal(classId) {
+  const c = T.classes.find(x=>x.classId===classId)||{};
+  modal(`
+    <div class="px-5 py-4 border-b border-slate-100 flex justify-between items-center">
+      <h3 class="font-bold text-base">${esc(c.className)} <span class="text-slate-400 font-normal text-sm">· sinh viên</span></h3>
+      <button onclick="closeModal()" class="text-slate-400 text-xl">×</button>
+    </div>
+    <div class="p-5">
+      <div class="flex gap-2 mb-3">
+        <button onclick="addStuForm('${classId}')" class="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs font-semibold"><i data-lucide="user-plus" class="w-3.5 h-3.5"></i>Thêm SV</button>
+        <button onclick="bulkForm('${classId}')" class="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-md text-xs font-semibold"><i data-lucide="upload" class="w-3.5 h-3.5"></i>Nhập hàng loạt</button>
+      </div>
+      <div id="_sl" class="max-h-[55vh] overflow-auto"><div class="py-6 text-center text-slate-400">Đang tải…</div></div>
+    </div>`,true);
+  drawStudents(classId);
+}
+async function drawStudents(classId) {
+  const h=$('_sl'); if(!h) return;
+  try {
+    const list = await api('listStudents',{classId},true);
+    if (!list.length) { h.innerHTML='<div class="py-8 text-center text-slate-400">Lớp chưa có sinh viên.</div>'; return; }
+    h.innerHTML=`<table class="w-full"><thead><tr class="text-[10px] uppercase text-slate-400 border-b border-slate-200">
+      <th class="text-left py-2 font-bold">#</th><th class="text-left font-bold">Họ tên</th><th class="text-left font-bold">SBD</th><th class="text-left font-bold">SĐT</th><th></th></tr></thead>
+      <tbody>${list.map((s,i)=>`<tr class="border-b border-slate-50 hover:bg-slate-50">
+        <td class="py-2 text-slate-400">${i+1}</td>
+        <td class="font-semibold text-slate-700">${esc(s.fullName)}</td>
+        <td class="font-mono text-slate-600">${esc(s.sbd||'—')}</td>
+        <td class="text-slate-400">${esc(s.phone||'—')}</td>
+        <td class="text-right"><button onclick="delStu('${s.studentId}','${classId}')" class="text-slate-300 hover:text-red-500"><i data-lucide="trash-2" class="w-4 h-4"></i></button></td>
+      </tr>`).join('')}</tbody></table>`;
+    icons();
+  } catch(e) { h.innerHTML=`<div class="py-8 text-center text-red-500">${esc(e.message)}</div>`; }
+}
+function addStuForm(classId) {
+  modal(`
+    <div class="px-5 py-4 border-b border-slate-100 flex justify-between items-center"><h3 class="font-bold text-base">Thêm sinh viên</h3><button onclick="rosterModal('${classId}')" class="text-slate-400 text-xl">×</button></div>
+    <div class="p-5 space-y-3">
+      <div><label class="block font-semibold mb-1">Họ và tên *</label><input id="_sn" class="w-full px-3 py-2 border border-slate-200 rounded-md focus:ring-1 focus:ring-indigo-500 focus:outline-none"></div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="block font-semibold mb-1">SBD / MSSV</label><input id="_ss" class="w-full px-3 py-2 border border-slate-200 rounded-md font-mono focus:ring-1 focus:ring-indigo-500 focus:outline-none"></div>
+        <div><label class="block font-semibold mb-1">SĐT</label><input id="_sp" class="w-full px-3 py-2 border border-slate-200 rounded-md font-mono focus:ring-1 focus:ring-indigo-500 focus:outline-none"></div>
+      </div>
+    </div>
+    <div class="px-5 py-3.5 border-t border-slate-100 flex justify-end gap-2">
+      <button onclick="rosterModal('${classId}')" class="px-3.5 py-2 border border-slate-200 rounded-md text-xs">Quay lại</button>
+      <button onclick="saveStu('${classId}')" class="px-3.5 py-2 bg-indigo-600 text-white rounded-md text-xs font-bold">Lưu</button>
+    </div>`);
+}
+async function saveStu(classId) {
+  const n=$('_sn').value.trim(); if(!n) return toast('Nhập họ tên','err');
+  try { await api('addStudent',{classId,fullName:n,sbd:$('_ss').value.trim(),phone:$('_sp').value.trim()},true); toast('Đã thêm ✓'); rosterModal(classId); } catch(e){toast(e.message,'err');}
+}
+function bulkForm(classId) {
+  modal(`
+    <div class="px-5 py-4 border-b border-slate-100 flex justify-between items-center"><h3 class="font-bold text-base">Nhập hàng loạt</h3><button onclick="rosterModal('${classId}')" class="text-slate-400 text-xl">×</button></div>
+    <div class="p-5 space-y-2">
+      <p class="text-xs text-slate-500">Mỗi dòng 1 SV. Cột cách bằng <b>Tab</b> (copy từ Excel) hoặc phẩy:<br><code class="text-slate-600">Họ tên → SBD → SĐT → Email</code></p>
+      <textarea id="_bl" class="w-full px-3 py-2 border border-slate-200 rounded-md font-mono text-xs h-48 focus:ring-1 focus:ring-indigo-500 focus:outline-none" placeholder="Nguyễn Văn A	65666362	0901234567"></textarea>
+    </div>
+    <div class="px-5 py-3.5 border-t border-slate-100 flex justify-end gap-2">
+      <button onclick="rosterModal('${classId}')" class="px-3.5 py-2 border border-slate-200 rounded-md text-xs">Quay lại</button>
+      <button onclick="saveBulk('${classId}')" class="px-3.5 py-2 bg-indigo-600 text-white rounded-md text-xs font-bold">Nhập</button>
+    </div>`);
+}
+async function saveBulk(classId) {
+  const txt=$('_bl').value.trim(); if(!txt) return toast('Chưa có dữ liệu','err');
+  const rows=txt.split(/\r?\n/).map(l=>l.split(/\t|,/).map(c=>c.trim())).filter(r=>r[0]);
+  try { const r=await api('addStudentsBulk',{classId,rows},true); toast('Đã thêm '+r.added+' SV ✓'); rosterModal(classId); } catch(e){toast(e.message,'err');}
+}
+async function delStu(id,classId) {
+  if(!confirm('Xoá SV này?')) return;
+  try { await api('deleteStudent',{studentId:id},true); drawStudents(classId); } catch(e){toast(e.message,'err');}
+}
+
+/* =====================================================================
+   TAB: CREATE EXAM
+   ===================================================================== */
+let draft = [];
+function loadCreate() {
+  draft = [];
+  $('main').innerHTML = `
+    <header class="bg-white border-b border-slate-200 px-7 py-4 flex items-center justify-between sticky top-0 z-10">
+      <div><h1 class="text-lg font-bold text-slate-800">Tạo đề thi</h1>
+        <p class="text-slate-400 text-xs">Soạn câu hỏi · giao lớp · chấm tự động khi nộp</p></div>
+      <button onclick="saveExam()" class="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md text-xs font-bold shadow-sm">
+        <i data-lucide="save" class="w-4 h-4"></i>Lưu đề
+      </button>
+    </header>
+    <div class="p-7 max-w-3xl mx-auto space-y-5">
+      <div class="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
+        <div><label class="block font-semibold mb-1">Tên đề thi *</label><input id="_en" class="w-full px-3 py-2 border border-slate-200 rounded-md focus:ring-1 focus:ring-indigo-500 focus:outline-none" placeholder="VD: Practice Test – Unit 5"></div>
+        <div class="grid sm:grid-cols-2 gap-4">
+          <div><label class="block font-semibold mb-1">Giao cho lớp</label>
+            <select id="_ecl" class="w-full px-3 py-2 border border-slate-200 rounded-md bg-white focus:ring-1 focus:ring-indigo-500 focus:outline-none">
+              <option value="">— Không giao lớp (tự do) —</option>
+              ${T.classes.map(c=>`<option value="${c.classId}">${esc(c.className)}</option>`).join('')}
+            </select>
+          </div>
+          <div><label class="block font-semibold mb-1">Thời gian (phút) <span class="text-slate-400 font-normal">· 0 = không giới hạn</span></label>
+            <input id="_ed" type="number" value="0" class="w-full px-3 py-2 border border-slate-200 rounded-md font-mono focus:ring-1 focus:ring-indigo-500 focus:outline-none"></div>
+        </div>
+        <div class="grid sm:grid-cols-3 gap-4 items-end">
+          <div><label class="block font-semibold mb-1">Loại</label>
+            <select id="_em" class="w-full px-3 py-2 border border-slate-200 rounded-md bg-white focus:ring-1 focus:ring-indigo-500 focus:outline-none"><option value="test">Kiểm tra</option><option value="practice">Luyện tập</option></select></div>
+          <div><label class="block font-semibold mb-1">Số lượt làm</label>
+            <input id="_ea" type="number" value="1" class="w-full px-3 py-2 border border-slate-200 rounded-md font-mono focus:ring-1 focus:ring-indigo-500 focus:outline-none"></div>
+          <label class="flex items-center gap-2 pb-2.5 text-slate-600"><input id="_es" type="checkbox" class="w-4 h-4 accent-indigo-600">Đảo câu hỏi</label>
+        </div>
+      </div>
+      <div class="flex items-center justify-between">
+        <h2 class="font-bold text-slate-800 text-[15px]">Câu hỏi</h2>
+        <div class="flex gap-2">
+          <button onclick="addQ('mc')" class="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-md text-xs font-bold"><i data-lucide="list" class="w-3.5 h-3.5"></i>Trắc nghiệm</button>
+          <button onclick="addQ('fill')" class="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-700 hover:bg-amber-100 rounded-md text-xs font-bold"><i data-lucide="text-cursor-input" class="w-3.5 h-3.5"></i>Điền từ</button>
+        </div>
+      </div>
+      <div id="_qb" class="space-y-3"></div>
+    </div>`;
+  icons(); renderDraft();
+  // load classes in case not loaded yet
+  if (!T.classes.length) api('listClasses',{},true).then(list=>{ T.classes=list; const s=$('_ecl'); if(s) s.innerHTML='<option value="">— Không giao lớp —</option>'+list.map(c=>`<option value="${c.classId}">${esc(c.className)}</option>`).join(''); }).catch(()=>{});
+}
+
+function addQ(type) {
+  const id='q'+Date.now();
+  draft.push(type==='mc'
+    ? {id,type:'mc',text:'',points:1,options:['','','',''],correctIndex:0}
+    : {id,type:'fill',text:'',points:1,accepted:[''],caseSensitive:false});
+  renderDraft();
+  const last=$('_qb').lastElementChild; if(last) last.scrollIntoView({behavior:'smooth',block:'center'});
+}
+
+function renderDraft() {
+  const h=$('_qb'); if(!h) return;
+  if (!draft.length) { h.innerHTML='<div class="text-center py-10 text-slate-400 border border-dashed border-slate-300 rounded-xl bg-white">Thêm câu hỏi bằng các nút trên.</div>'; return; }
+  h.innerHTML = draft.map((q,i)=>`
+    <div class="bg-white rounded-xl border border-slate-200 p-4">
+      <div class="flex items-center justify-between mb-3">
+        <span class="font-mono font-bold text-indigo-600 text-xs">CÂU ${i+1} <span class="px-2 py-0.5 rounded text-[10px] ml-1 ${q.type==='mc'?'bg-indigo-100 text-indigo-700':'bg-amber-100 text-amber-700'}">${q.type==='mc'?'TRẮC NGHIỆM':'ĐIỀN TỪ'}</span></span>
+        <div class="flex items-center gap-2">
+          <span class="text-[11px] text-slate-400">Điểm</span>
+          <input type="number" min="0" step="0.25" value="${q.points}" oninput="qUpd(${i},'points',this.value)" class="w-16 px-2 py-1 border border-slate-200 rounded font-mono text-center focus:ring-1 focus:ring-indigo-500 focus:outline-none text-xs">
+          <button onclick="delQ(${i})" class="text-slate-300 hover:text-red-500"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+        </div>
+      </div>
+      <textarea oninput="qUpd(${i},'text',this.value)" class="w-full px-3 py-2 border border-slate-200 rounded-md mb-2 focus:ring-1 focus:ring-indigo-500 focus:outline-none text-sm" placeholder="Nội dung câu hỏi…" rows="2">${esc(q.text)}</textarea>
+      ${q.type==='mc' ? mcEditor(q,i) : fillEditor(q,i)}
+    </div>`).join('');
+  icons();
+}
+
+function mcEditor(q,i) {
+  return `<div class="space-y-2">${q.options.map((o,oi)=>`
+    <div class="flex items-center gap-2">
+      <input type="radio" name="cr${i}" ${q.correctIndex===oi?'checked':''} onchange="qUpd(${i},'correctIndex',${oi})" class="w-4 h-4 accent-emerald-600 shrink-0" title="Đáp án đúng">
+      <input value="${esc(o)}" oninput="qOpt(${i},${oi},this.value)" class="flex-1 px-3 py-1.5 border border-slate-200 rounded-md focus:ring-1 focus:ring-indigo-500 focus:outline-none text-sm" placeholder="Phương án ${String.fromCharCode(65+oi)}">
+      ${q.options.length>2?`<button onclick="delOpt(${i},${oi})" class="text-slate-300 hover:text-red-500 shrink-0"><i data-lucide="x" class="w-4 h-4"></i></button>`:''}
+    </div>`).join('')}</div>
+  <button onclick="addOpt(${i})" class="mt-2 text-xs text-indigo-600 font-semibold">+ thêm phương án</button>
+  <p class="text-[11px] text-slate-400 mt-1">Chọn ◉ ở phương án đúng.</p>`;
+}
+
+function fillEditor(q,i) {
+  return `<label class="block text-xs font-semibold text-slate-600 mb-1">Đáp án chấp nhận <span class="font-normal text-slate-400">(mỗi dòng 1 đáp án — đúng nếu khớp một)</span></label>
+  <textarea oninput="qAcc(${i},this.value)" class="w-full px-3 py-2 border border-slate-200 rounded-md font-mono text-xs focus:ring-1 focus:ring-indigo-500 focus:outline-none" rows="3" placeholder="personality&#10;personalities">${esc((q.accepted||[]).join('\n'))}</textarea>
+  <label class="flex items-center gap-2 mt-2 text-slate-600 text-xs"><input type="checkbox" ${q.caseSensitive?'checked':''} onchange="qUpd(${i},'caseSensitive',this.checked)" class="w-4 h-4 accent-indigo-600">Phân biệt hoa/thường</label>`;
+}
+
+function qUpd(i,k,v) { if(k==='points') v=parseFloat(v)||0; if(k==='correctIndex') v=+v; draft[i][k]=v; }
+function qOpt(i,oi,v) { draft[i].options[oi]=v; }
+function qAcc(i,v) { draft[i].accepted=v.split(/\r?\n/).map(s=>s.trim()).filter(Boolean); if(!draft[i].accepted.length) draft[i].accepted=['']; }
+function addOpt(i) { draft[i].options.push(''); renderDraft(); }
+function delOpt(i,oi) { draft[i].options.splice(oi,1); if(draft[i].correctIndex>=draft[i].options.length) draft[i].correctIndex=0; renderDraft(); }
+function delQ(i) { draft.splice(i,1); renderDraft(); }
+
+async function saveExam() {
+  const name=($('_en')||{}).value?.trim(); if(!name) return toast('Nhập tên đề','err');
+  if(!draft.length) return toast('Đề chưa có câu hỏi','err');
+  for(const q of draft){
+    if(!q.text.trim()) return toast('Có câu hỏi chưa nhập nội dung','err');
+    if(q.type==='fill'&&!q.accepted.some(a=>a.trim())) return toast('Câu điền từ chưa có đáp án','err');
+    if(q.type==='mc'&&q.options.some(o=>!o.trim())) return toast('Phương án trắc nghiệm còn trống','err');
+  }
+  try {
+    const r = await api('createExam',{
+      examName:name, classId:($('_ecl')||{}).value||'', durationMin:+($('_ed')||{}).value||0,
+      mode:($('_em')||{}).value||'test', maxAttempts:+($('_ea')||{}).value||1,
+      shuffle:($('_es')||{}).checked||false,
+      questions:draft.map(q=>({...q,accepted:q.type==='fill'?q.accepted.filter(a=>a.trim()):undefined}))
+    },true);
+    examDoneModal(r.examCode, name);
+  } catch(e) { toast(e.message,'err'); }
+}
+
+function examDoneModal(code, name) {
+  const base = location.origin + location.pathname;
+  const link = base + '?exam=' + code;
+  modal(`
+    <div class="p-6 text-center">
+      <div class="w-14 h-14 rounded-full bg-emerald-50 flex items-center justify-center mx-auto mb-3"><i data-lucide="check" class="w-7 h-7 text-emerald-600"></i></div>
+      <h3 class="font-bold text-lg text-slate-800">Đã tạo đề!</h3>
+      <p class="text-slate-500 mb-4">${esc(name)}</p>
+      <div class="bg-slate-50 rounded-lg p-4 space-y-3 text-left">
+        <div><label class="block text-[11px] font-bold text-slate-400 uppercase mb-1">Mã đề</label>
+          <div class="font-mono text-2xl font-bold text-center tracking-widest text-slate-800">${esc(code)}</div></div>
+        <div><label class="block text-[11px] font-bold text-slate-400 uppercase mb-1">Link cho sinh viên</label>
+          <input readonly onclick="this.select()" value="${esc(link)}" class="w-full px-3 py-2 border border-slate-200 rounded-md font-mono text-xs bg-white"></div>
+      </div>
+      <div class="flex gap-2 mt-4">
+        <button onclick="navigator.clipboard.writeText('${esc(link)}');toast('Đã copy link ✓')" class="flex-1 px-3 py-2.5 bg-indigo-600 text-white rounded-md text-xs font-bold">Copy link</button>
+        <button onclick="closeModal();draft=[];loadCreate()" class="flex-1 px-3 py-2.5 border border-slate-200 rounded-md text-xs font-bold">Tạo đề khác</button>
+        <button onclick="renderTeacher('room')" class="flex-1 px-3 py-2.5 bg-slate-800 text-white rounded-md text-xs font-bold">Giám sát phòng</button>
+      </div>
+    </div>`);
+}
+
+/* =====================================================================
+   TAB: ROOM (Live monitoring)
+   ===================================================================== */
+function loadRoom() {
+  Room.examId = null; Room.data = null; Room.polling = true;
+  $('main').innerHTML = `
+    <header class="bg-white border-b border-slate-200 px-7 py-3.5 flex items-center justify-between gap-4 sticky top-0 z-10">
+      <div class="flex items-center gap-4 min-w-0">
+        <div><h1 class="text-lg font-bold text-slate-800">Quản lý phòng thi</h1>
+          <p class="text-slate-400 text-xs">Giám sát tiến độ &amp; màn hình theo thời gian thực</p></div>
+        <select id="_rp" onchange="selectRoom(this.value)" class="px-3 py-2 border border-slate-200 rounded-md bg-white text-xs max-w-[280px] focus:ring-1 focus:ring-indigo-500 focus:outline-none"></select>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        <span id="_ld" class="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-600"><span class="w-2 h-2 rounded-full bg-emerald-500 live"></span>Đang cập nhật</span>
+        <button id="_pb" onclick="toggleRoomPoll()" class="px-3 py-1.5 border border-slate-200 rounded-md text-xs font-semibold hover:bg-slate-50 flex items-center gap-1.5"><i data-lucide="pause" class="w-3.5 h-3.5"></i>Tạm dừng</button>
+        <button onclick="exportCSV()" class="px-3 py-1.5 border border-slate-200 rounded-md text-xs font-semibold hover:bg-slate-50 flex items-center gap-1.5"><i data-lucide="download" class="w-3.5 h-3.5"></i>CSV</button>
+      </div>
+    </header>
+    <div class="p-7 space-y-5">
+      <div id="_rc" class="grid grid-cols-2 lg:grid-cols-6 gap-3"></div>
+      <div class="grid lg:grid-cols-4 gap-5">
+        <div class="lg:col-span-3 bg-white rounded-xl border border-slate-200 overflow-hidden"><div id="_rt" class="overflow-x-auto"></div></div>
+        <div class="bg-white rounded-xl border border-slate-200 flex flex-col">
+          <div class="px-4 py-3 border-b border-slate-100 font-bold text-slate-700 flex items-center gap-2"><i data-lucide="activity" class="w-4 h-4 text-indigo-500"></i>Nhật ký</div>
+          <div id="_rf" class="p-2 space-y-1 flex-1 overflow-auto max-h-[70vh]"></div>
+        </div>
+      </div>
+    </div>`;
+  icons();
+  if (T.exams.length) {
+    $('_rp').innerHTML = T.exams.map(e=>`<option value="${e.examId}">${esc(e.examName)} · ${esc(e.className||'tự do')}</option>`).join('');
+    selectRoom(T.exams[0].examId);
+  } else {
+    api('listExams',{},true).then(list=>{ T.exams=list; if(!list.length){ $('_rt').innerHTML='<div class="text-center py-16 text-slate-400">Chưa có đề thi.</div>'; return; }
+      $('_rp').innerHTML=list.map(e=>`<option value="${e.examId}">${esc(e.examName)} · ${esc(e.className||'tự do')}</option>`).join(''); selectRoom(list[0].examId); }).catch(e=>toast(e.message,'err'));
+  }
+}
+
+function selectRoom(id) { Room.examId=id; pollRoom(); }
+
+async function pollRoom() {
+  if (!Room.examId) return;
+  try {
+    const [d,ev] = await Promise.all([api('listSubmissions',{examId:Room.examId},true), api('listEvents',{examId:Room.examId,limit:40},true)]);
+    Room.data=d; renderRoomCards(); renderRoomTable(); renderFeed(ev);
+  } catch(e) { toast(e.message,'err'); }
+}
+
+function roomStatCard(label,val,col) { return `<div class="bg-white rounded-xl border border-slate-200 p-3.5"><div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">${label}</div><div class="text-2xl font-extrabold font-mono mt-0.5 ${col}">${val}</div></div>`; }
+
+function renderRoomCards() {
+  const s=Room.data.summary;
+  $('_rc').innerHTML =
+    roomStatCard('Tổng SV',s.total,'text-slate-800')+
+    roomStatCard('Đang làm',s.inProgress,'text-sky-600')+
+    roomStatCard('Đã nộp',s.submitted,'text-emerald-600')+
+    roomStatCard('Chưa làm',s.notStarted,'text-slate-400')+
+    roomStatCard('Cảnh báo',s.warnings,s.warnings>0?'text-red-600':'text-slate-400')+
+    roomStatCard('Điểm TB',s.avg==null?'—':s.avg,'text-indigo-600');
+}
+
+function sbadge(st) {
+  if(st==='submitted') return '<span class="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full"><span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>Đã nộp</span>';
+  if(st==='in_progress') return '<span class="inline-flex items-center gap-1 text-[11px] font-bold text-sky-700 bg-sky-100 px-2 py-0.5 rounded-full"><span class="w-1.5 h-1.5 rounded-full bg-sky-500 live"></span>Đang làm</span>';
+  return '<span class="inline-flex items-center gap-1 text-[11px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full"><span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span>Chưa làm</span>';
+}
+
+function wbadge(n) {
+  if(n>=3) return `<span class="inline-flex items-center gap-1 text-[11px] font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full"><i data-lucide="shield-alert" class="w-3 h-3"></i>${n} lần</span>`;
+  if(n>0) return `<span class="inline-flex items-center gap-1 text-[11px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full"><i data-lucide="alert-triangle" class="w-3 h-3"></i>${n} lần</span>`;
+  return `<span class="text-[11px] text-emerald-600 inline-flex items-center gap-1"><i data-lucide="shield-check" class="w-3 h-3"></i>An toàn</span>`;
+}
+
+function renderRoomTable() {
+  const d=Room.data; if(!d||!d.rows.length) { $('_rt').innerHTML='<div class="text-center py-16 text-slate-400">Đề này chưa giao lớp hoặc chưa có SV.</div>'; return; }
+  $('_rt').innerHTML=`<table class="w-full text-[13px]"><thead><tr class="text-[10px] uppercase text-slate-400 bg-slate-50 border-b border-slate-200">
+    <th class="text-left px-4 py-2.5 font-bold">SBD</th><th class="text-left font-bold">Họ tên</th><th class="text-left font-bold">Trạng thái</th>
+    <th class="text-left font-bold px-3">Tiến độ</th><th class="text-left font-bold">Còn lại</th><th class="text-left font-bold">Điểm</th>
+    <th class="text-left font-bold">Giám sát</th><th class="text-left font-bold">Cập nhật</th><th></th></tr></thead>
+    <tbody>${d.rows.map(r=>{
+      const pct=r.totalQuestions?Math.round(r.progress/r.totalQuestions*100):0;
+      const timeEl = r.status==='submitted'?'<span class="text-emerald-600 font-mono">✓ xong</span>':r.status!=='in_progress'?'<span class="text-slate-300">—</span>':d.durationMin===0?'<span class="font-mono text-slate-500">∞</span>':`<span id="t_${r.submissionId}" class="font-mono font-bold ${r.remainingTime<=60?'text-red-600':'text-slate-700'}">${clock(r.remainingTime)}</span>`;
+      return `<tr class="border-b border-slate-50 hover:bg-slate-50/60 ${r.tabSwitches>=3?'bg-red-50/40':''}">
+        <td class="px-4 py-2.5 font-mono text-slate-500">${esc(r.sbd||'—')}</td>
+        <td class="font-semibold text-slate-700">${esc(r.fullName)}</td>
+        <td>${sbadge(r.status)}</td>
+        <td class="px-3 w-40"><div class="flex items-center gap-2"><div class="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden"><div class="h-full ${pct>=100?'bg-emerald-500':'bg-indigo-500'}" style="width:${pct}%"></div></div><span class="font-mono text-[11px] text-slate-500 w-12 text-right">${r.progress}/${r.totalQuestions}</span></div></td>
+        <td>${timeEl}</td>
+        <td class="font-mono font-bold ${r.status==='submitted'?'text-slate-800':'text-slate-300'}">${r.status==='submitted'?r.score:'—'}</td>
+        <td>${wbadge(r.tabSwitches)}</td>
+        <td class="text-slate-400 text-[11px]">${ago(r.lastSeen)}</td>
+        <td class="text-right pr-4 whitespace-nowrap">
+          ${r.tabSwitches>0?`<button onclick="resetW('${r.submissionId}')" class="text-[11px] text-amber-600 font-semibold hover:underline mr-2">Xoá CB</button>`:''}
+          ${r.status==='submitted'?`<button onclick="reviewModal('${r.submissionId}')" class="text-[11px] text-indigo-600 font-semibold hover:underline">Xem bài</button>`:''}
+        </td></tr>`;
+    }).join('')}</tbody></table>`;
+  icons();
+}
+
+function renderFeed(ev) {
+  const h=$('_rf'); if(!h) return;
+  if(!ev.length) { h.innerHTML='<div class="text-center text-slate-400 py-6 text-xs">Chưa có hoạt động.</div>'; return; }
+  const ic={start:['log-in','text-slate-400'],submit:['check-circle-2','text-emerald-500'],leave_screen:['eye-off','text-red-500'],tab_switch:['eye-off','text-red-500'],blur:['eye-off','text-amber-500'],fullscreen_exit:['minimize-2','text-amber-500']};
+  h.innerHTML=ev.map(e=>{const[i,col]=ic[e.type]||['dot','text-slate-400'];return `<div class="flex gap-2.5 px-2 py-1.5 rounded-lg hover:bg-slate-50"><i data-lucide="${i}" class="w-3.5 h-3.5 mt-0.5 shrink-0 ${col}"></i><div class="min-w-0"><div class="text-[12px] text-slate-700 leading-snug"><b>${esc(e.studentName||'Hệ thống')}</b> ${esc(e.detail)}${e.count?` <span class="text-red-500 font-bold">(${e.count})</span>`:''}</div><div class="text-[10px] text-slate-400 font-mono">${ago(e.ts)}</div></div></div>`;}).join('');
+  icons();
+}
+
+function roomTick() {
+  if(!Room.data||!Room.polling||!Room.data.durationMin) return;
+  Room.data.rows.forEach(r=>{
+    if(r.status==='in_progress'&&r.remainingTime>0) {
+      r.remainingTime--;
+      const el=$('t_'+r.submissionId);
+      if(el){el.textContent=clock(r.remainingTime); if(r.remainingTime<=60) el.className='font-mono font-bold text-red-600';}
+    }
+  });
+}
+
+function toggleRoomPoll() {
+  Room.polling=!Room.polling;
+  const b=$('_pb'), d=$('_ld'); if(!b||!d) return;
+  b.innerHTML=Room.polling?'<i data-lucide="pause" class="w-3.5 h-3.5"></i>Tạm dừng':'<i data-lucide="play" class="w-3.5 h-3.5"></i>Tiếp tục';
+  d.className=`flex items-center gap-1.5 text-[11px] font-semibold ${Room.polling?'text-emerald-600':'text-slate-400'}`;
+  d.innerHTML=Room.polling?'<span class="w-2 h-2 rounded-full bg-emerald-500 live"></span>Đang cập nhật':'<span class="w-2 h-2 rounded-full bg-slate-400"></span>Đã tạm dừng';
+  icons(); if(Room.polling) pollRoom();
+}
+
+async function resetW(sid) { try{await api('resetWarnings',{submissionId:sid},true);toast('Đã xoá cảnh báo');pollRoom();}catch(e){toast(e.message,'err');} }
+
+async function reviewModal(sid) {
+  modal('<div class="p-10 text-center text-slate-400">Đang tải…</div>',true);
+  try {
+    const d=await api('getSubmission',{submissionId:sid},true);
+    const per={}; (d.result?.perQuestion||[]).forEach(p=>per[p.qid]=p);
+    const correct=(d.result?.perQuestion||[]).filter(p=>p.correct).length;
+    modal(`<div class="px-5 py-4 border-b border-slate-100 flex justify-between items-center">
+        <div><h3 class="font-bold text-base">${esc(d.studentName)}</h3><p class="text-slate-400 text-xs">SBD ${esc(d.sbd||'—')} · ${clock(d.timeSpentSec)} · vi phạm: ${d.tabSwitches}</p></div>
+        <button onclick="closeModal()" class="text-slate-400 text-xl">×</button></div>
+      <div class="p-5 max-h-[75vh] overflow-auto">
+        <div class="grid grid-cols-3 gap-3 mb-5">
+          <div class="bg-indigo-50 rounded-lg p-3 text-center"><div class="text-[10px] font-bold text-indigo-400 uppercase">Điểm</div><div class="text-2xl font-extrabold text-indigo-700 font-mono">${d.score}<span class="text-sm text-indigo-300">/10</span></div></div>
+          <div class="bg-emerald-50 rounded-lg p-3 text-center"><div class="text-[10px] font-bold text-emerald-400 uppercase">Đúng</div><div class="text-2xl font-extrabold text-emerald-700 font-mono">${correct}/${d.questions.length}</div></div>
+          <div class="bg-slate-50 rounded-lg p-3 text-center"><div class="text-[10px] font-bold text-slate-400 uppercase">Thời gian</div><div class="text-2xl font-extrabold text-slate-700 font-mono">${clock(d.timeSpentSec)}</div></div>
+        </div>
+        ${(d.questions||[]).map((q,i)=>{const p=per[q.id],ok=p&&p.correct,given=p?p.given:'';let body;
+          if(q.type==='mc'){const gi=given===''||given==null?-1:+given;body=`<div class="mt-1">SV chọn: <span class="px-2 py-0.5 rounded text-xs font-semibold ${ok?'bg-emerald-100 text-emerald-700':'bg-red-100 text-red-700'}">${gi>=0&&q.options?esc(q.options[gi]):'(bỏ trống)'}</span></div>${!ok?`<div class="text-xs text-emerald-600 font-semibold mt-1">✓ Đúng: ${esc(q.options?q.options[q.correctIndex]:'')}</div>`:''}`;}
+          else{body=`<div class="mt-1">SV nhập: <span class="px-2 py-0.5 rounded text-xs font-semibold ${ok?'bg-emerald-100 text-emerald-700':'bg-red-100 text-red-700'}">${given?esc(given):'(bỏ trống)'}</span></div>${!ok?`<div class="text-xs text-emerald-600 font-semibold mt-1">✓ Chấp nhận: ${esc((q.accepted||[]).join(' | '))}</div>`:''}`;}
+          return `<div class="py-3 border-b border-slate-100"><div class="flex justify-between"><b class="font-mono text-indigo-600 text-xs">Câu ${i+1}</b><span class="text-[11px] text-slate-400">${p?p.earned:0}/${p?p.points:(q.points||1)} đ</span></div><div class="whitespace-pre-wrap mt-0.5 text-slate-700 text-sm">${esc(q.text)}</div>${body}</div>`;
+        }).join('')}
+      </div>`,true);
+  } catch(e) { toast(e.message,'err'); closeModal(); }
+}
+
+function exportCSV() {
+  if(!Room.data||!Room.data.rows.length) return toast('Không có dữ liệu','err');
+  const h=['SBD','Họ tên','Trạng thái','Tiến độ','Tổng câu','Điểm','Vi phạm','Cập nhật'];
+  const st={submitted:'Đã nộp',in_progress:'Đang làm',not_started:'Chưa làm'};
+  const rows=Room.data.rows.map(r=>[r.sbd,r.fullName,st[r.status]||r.status,r.progress,r.totalQuestions,r.status==='submitted'?r.score:'',r.tabSwitches,r.lastSeen]);
+  const csv='\uFEFF'+[h.join(','),...rows.map(r=>r.map(c=>`"${String(c==null?'':c).replace(/"/g,'""')}"`).join(','))].join('\n');
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'})); a.download='phongthi_'+(Room.data.examCode||'export')+'.csv'; a.click();
+}
+
+/* =====================================================================
+   STUDENT VIEW
+   ===================================================================== */
+function stuView(code) {
+  // No code yet → show code entry
+  if (!code) { stuCodeEntry(); return; }
+  $('app').className='min-h-screen bg-slate-50';
+  $('app').innerHTML='<div class="max-w-3xl mx-auto px-4 py-6"><div class="text-center py-24 text-slate-400">Đang tải đề…</div></div>';
+  api('getExamByCode',{examCode:code})
+    .then(exam=>{ S.exam=exam; S.dur=exam.durationMin; stuEntry(code); })
+    .catch(e=>{ $('app').innerHTML=`<div class="min-h-screen flex items-center justify-center"><div class="bg-white rounded-2xl border border-slate-200 shadow p-8 text-center max-w-md"><div class="text-4xl mb-2">🔒</div><h2 class="text-xl font-bold text-slate-800">Không vào được đề</h2><p class="text-slate-500 mt-1">${esc(e.message)}</p><button onclick="stuCodeEntry()" class="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold">Thử lại</button></div></div>`; });
+}
+
+function stuCodeEntry() {
+  $('app').className='min-h-screen bg-slate-50';
+  $('app').innerHTML=`<div class="min-h-screen flex items-center justify-center px-4"><div class="bg-white rounded-2xl border border-slate-200 shadow p-7 max-w-sm w-full pop">
+    <div class="text-center mb-5"><div class="w-12 h-12 bg-indigo-500 rounded-xl flex items-center justify-center text-white font-bold text-lg mx-auto mb-2">EH</div><h1 class="text-xl font-bold text-slate-800">Exam Hub</h1><p class="text-slate-400 text-sm">Nhập mã đề để bắt đầu</p></div>
+    <div><label class="block font-semibold mb-1 text-[13px]">Mã đề</label><input id="_ec" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg font-mono text-center text-lg tracking-widest uppercase focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 focus:outline-none" placeholder="XXXXXX" maxlength="10"></div>
+    <button onclick="const c=$('_ec').value.trim().toLowerCase();if(c){history.replaceState({},'','?exam='+c);stuView(c);}else toast('Nhập mã đề','err')" class="mt-4 w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold text-sm">Tìm đề</button>
+  </div></div>`;
+  icons(); setTimeout(()=>{ const el=$('_ec'); if(el) el.focus(); },100);
+}
+
+function stuEntry(code) {
+  $('app').innerHTML=`<div class="min-h-screen flex items-center justify-center px-4"><div class="bg-white rounded-2xl border border-slate-200 shadow p-7 max-w-md w-full pop">
+    <div class="font-mono text-xs bg-slate-800 text-white inline-block px-3 py-1 rounded mb-3 tracking-widest">${esc(code)}</div>
+    <h1 class="text-xl font-bold text-slate-800">${esc(S.exam.examName)}</h1>
+    <p class="text-slate-500 text-sm mt-0.5">${S.exam.questions.length} câu${S.dur?' · '+S.dur+' phút':''} · ${S.exam.mode==='test'?'Kiểm tra':'Luyện tập'}</p>
+    <div class="mt-4 space-y-3">
+      <div><label class="block text-xs font-semibold text-slate-600 mb-1">Họ và tên</label><input id="_nm" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 focus:outline-none" placeholder="Họ tên đầy đủ"></div>
+      <div><label class="block text-xs font-semibold text-slate-600 mb-1">SBD / MSSV</label><input id="_sb" class="w-full px-3 py-2.5 border border-slate-200 rounded-lg font-mono focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 focus:outline-none" placeholder="Mã số sinh viên"></div>
+    </div>
+    <div class="mt-4 flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3 text-[12px] text-amber-800">
+      <i data-lucide="eye" class="w-4 h-4 mt-0.5 shrink-0"></i>
+      <span>Bài thi <b>giám sát màn hình</b>: rời tab, chuyển cửa sổ hoặc thoát toàn màn hình sẽ được ghi nhận và báo giảng viên.</span>
+    </div>
+    <button onclick="stuBegin('${code}')" class="mt-4 w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold flex items-center justify-center gap-2"><i data-lucide="play" class="w-4 h-4"></i>Bắt đầu làm bài</button>
+  </div></div>`;
+  icons();
+}
+
+async function stuBegin(code) {
+  const name=($('_nm')||{}).value?.trim(), sbd=($('_sb')||{}).value?.trim();
+  if (!name) return toast('Nhập họ tên','err');
+  if (S.exam.classId && !sbd) return toast('Nhập SBD/MSSV','err');
+  try {
+    const r = await api('startAttempt',{examCode:code,studentName:name,sbd:sbd||''});
+    S.subId=r.submissionId; S.answers=r.answers||{}; M.count=r.tabSwitches||0;
+    if (S.dur>0) S.deadline=new Date(r.startedAt).getTime()+S.dur*60000;
+    if (r.resumed) toast('Tiếp tục bài đang làm dở');
+    try { await document.documentElement.requestFullscreen(); } catch(_) {}
+    stuRenderExam(); monitorOn();
+  } catch(e) { toast(e.message,'err'); }
+}
+
+function stuRenderExam() {
+  $('app').innerHTML=`
+    <div id="_xh" class="sticky top-0 z-30 -mx-0 px-4 py-3 bg-white/90 backdrop-blur border-b border-slate-200 flex items-center justify-between">
+      <div class="min-w-0"><div class="font-bold text-slate-800 truncate">${esc(S.exam.examName)}</div><div id="_xs" class="text-[11px] text-slate-400">đã lưu</div></div>
+      <div id="_xt" class="font-mono font-bold text-xl text-slate-700">${S.dur>0?'--:--':'∞'}</div>
+    </div>
+    <div id="_xw" class="hidden sticky top-[60px] z-20 mx-4 mt-2"></div>
+    <div class="max-w-3xl mx-auto px-4 space-y-3 mt-3">
+      <div id="_xq"></div>
+      <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 text-center mt-3">
+        <div class="text-slate-500 mb-2">Đã trả lời <b id="_xn">0</b>/${S.exam.questions.length} câu</div>
+        <div id="_xd" class="flex flex-wrap justify-center gap-1.5 mb-4"></div>
+        <button onclick="stuSubmit(false)" class="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold inline-flex items-center gap-2"><i data-lucide="send" class="w-4 h-4"></i>Nộp bài</button>
+      </div>
+    </div>`;
+  $('_xq').innerHTML = S.exam.questions.map((q,i)=>stuQHTML(q,i)).join('');
+  stuSync();
+  saveInt = setInterval(stuSave, 25000);
+  if (S.dur>0) { stuTick(); timerInt=setInterval(stuTick,1000); }
+  icons();
+}
+
+function stuQHTML(q,i) {
+  const a = S.answers[q.id];
+  let inner;
+  if (q.type==='mc') {
+    inner = q.options.map((o,oi)=>`
+      <label id="ch_${q.id}_${oi}" class="block border rounded-xl px-4 py-3 mb-2 cursor-pointer transition ${+a===oi?'border-indigo-500 bg-indigo-50/60':'border-slate-200 hover:border-indigo-300'}">
+        <input type="radio" name="${q.id}" ${+a===oi?'checked':''} onchange="stuAns('${q.id}',${oi})" class="mr-2.5 accent-indigo-600">${esc(o)}</label>`).join('');
+  } else {
+    inner = `<input value="${esc(a==null?'':a)}" oninput="stuAns('${q.id}',this.value)" class="w-full px-4 py-2.5 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400 focus:outline-none" placeholder="Nhập câu trả lời…">`;
+  }
+  return `<div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+    <div class="flex gap-2 mb-3"><span class="font-mono font-bold text-indigo-600 shrink-0 text-sm">Câu ${i+1}</span>
+      <span class="text-slate-700 whitespace-pre-wrap text-sm">${esc(q.text)}</span></div>${inner}</div>`;
+}
+
+function stuAns(qid,val) {
+  S.answers[qid]=val;
+  const q=S.exam.questions.find(x=>x.id===qid);
+  if(q&&q.type==='mc') q.options.forEach((_,oi)=>{ const el=$('ch_'+qid+'_'+oi); if(el) el.className='block border rounded-xl px-4 py-3 mb-2 cursor-pointer transition '+(+val===oi?'border-indigo-500 bg-indigo-50/60':'border-slate-200 hover:border-indigo-300'); });
+  stuSync(); const ss=$('_xs'); if(ss) ss.textContent='đang lưu…';
+  clearTimeout(saveT); saveT=setTimeout(stuSave,1500);
+}
+
+function stuAnswered() { return S.exam.questions.filter(q=>S.answers[q.id]!=null&&S.answers[q.id]!=='').length; }
+
+function stuSync() {
+  const n=$('_xn'); if(n) n.textContent=stuAnswered();
+  const d=$('_xd'); if(!d) return;
+  d.innerHTML=S.exam.questions.map((q,i)=>{const done=S.answers[q.id]!=null&&S.answers[q.id]!=='';return`<button onclick="document.querySelectorAll('#_xq>div')[${i}]?.scrollIntoView({behavior:'smooth',block:'center'})" class="w-7 h-7 rounded-lg text-[11px] font-bold border ${done?'bg-indigo-600 text-white border-indigo-600':'bg-white text-slate-400 border-slate-200'}">${i+1}</button>`;}).join('');
+}
+
+async function stuSave() {
+  if(!S.subId) return;
+  try { await api('saveProgress',{submissionId:S.subId,answers:S.answers,progress:stuAnswered()}); const s=$('_xs'); if(s) s.textContent='đã lưu ✓'; }
+  catch(_) { const s=$('_xs'); if(s) s.textContent='lưu lỗi — kiểm tra mạng'; }
+}
+
+function stuTick() {
+  const el=$('_xt'); if(!el) return;
+  const left=Math.max(0,Math.round((S.deadline-Date.now())/1000));
+  el.textContent=clock(left);
+  el.className='font-mono font-bold text-xl '+(left<=60?'text-red-600':'text-slate-700');
+  if(left<=0) { clearInterval(timerInt); toast('Hết giờ — tự động nộp','warn'); stuSubmit(true); }
+}
+
+async function stuSubmit(auto) {
+  M.paused=true;
+  if(!auto){const un=S.exam.questions.length-stuAnswered();if(!confirm(un?`Còn ${un} câu chưa trả lời. Vẫn nộp bài?`:'Nộp bài?')){M.paused=false;return;}}
+  clearInterval(timerInt); clearInterval(saveInt); clearTimeout(saveT); monitorOff();
+  try {
+    const r=await api('submitExam',{submissionId:S.subId,answers:S.answers});
+    if(document.fullscreenElement) document.exitFullscreen().catch(()=>{});
+    stuResult(r);
+  } catch(e) { toast(e.message,'err'); M.paused=false; }
+}
+
+function stuResult(r) {
+  const good=r.score>=5;
+  $('app').innerHTML=`<div class="min-h-screen flex items-center justify-center px-4"><div class="bg-white rounded-2xl border border-slate-200 shadow p-8 text-center max-w-md w-full pop">
+    <div class="text-5xl mb-2">${good?'🎉':'📋'}</div>
+    <h2 class="text-xl font-bold text-slate-800">Đã nộp bài!</h2>
+    <div class="text-6xl font-extrabold font-mono mt-3 ${good?'text-emerald-600':'text-amber-600'}">${r.score}<span class="text-2xl text-slate-300">/10</span></div>
+    <p class="text-slate-500 mt-2">Đúng ${r.raw}/${r.rawMax} điểm · ${clock(r.timeSpentSec)}${M.count?' · rời màn hình '+M.count+' lần':''}</p>
+    <p class="text-slate-400 text-xs mt-3">${S.exam.mode==='practice'?'Bạn có thể đóng trang này.':'Kết quả đã gửi về giảng viên.'}</p>
+  </div></div>`;
+}
+
+/* =====================================================================
+   MONITOR (screen monitoring for student)
+   ===================================================================== */
+function monitorOn() {
+  M.on=true; M.paused=false;
+  document.addEventListener('visibilitychange', _vis);
+  window.addEventListener('blur', _blur);
+  document.addEventListener('fullscreenchange', _fs);
+}
+function monitorOff() {
+  M.on=false;
+  document.removeEventListener('visibilitychange', _vis);
+  window.removeEventListener('blur', _blur);
+  document.removeEventListener('fullscreenchange', _fs);
+}
+function _vis() { if(document.hidden) monHit('tab_switch','Rời tab / chuyển cửa sổ'); }
+function _blur() { monHit('blur','Mất tiêu điểm cửa sổ'); }
+function _fs()  { if(!document.fullscreenElement) monHit('fullscreen_exit','Thoát toàn màn hình'); }
+function monHit(type,detail) {
+  if(!M.on||M.paused) return;
+  const now=Date.now(); if(now-M.last<1500) return;
+  M.last=now; M.count++;
+  monBanner(M.count);
+  api('reportEvent',{submissionId:S.subId,type,detail}).then(r=>{ if(r&&r.tabSwitches){ M.count=r.tabSwitches; monBanner(M.count); }}).catch(()=>{});
+}
+function monBanner(n) {
+  const b=$('_xw'); if(!b) return;
+  b.classList.remove('hidden');
+  b.style.animation='shake .3s'; setTimeout(()=>b.style.animation='',300);
+  const sev=n>=3;
+  b.className=`sticky top-[60px] z-20 mx-4 mt-2 px-4 py-2.5 rounded-lg text-[13px] font-semibold flex items-center gap-2 ${sev?'bg-red-600 text-white':'bg-amber-100 text-amber-800 border border-amber-300'}`;
+  b.innerHTML=`<i data-lucide="${sev?'shield-alert':'alert-triangle'}" class="w-4 h-4 shrink-0"></i>Đã ghi nhận rời màn hình <b>${n}</b> lần — sẽ báo giảng viên.`;
+  icons();
+}
+
+/* =====================================================================
+   START
+   ===================================================================== */
+window.addEventListener('DOMContentLoaded', () => {
+  boot();
+  // Teacher polling intervals (set once, run while on room tab)
+  pollInt = setInterval(() => { if(T.tab==='room' && Room.polling && Room.examId) pollRoom(); }, 8000);
+  tickInt = setInterval(() => { if(T.tab==='room') roomTick(); }, 1000);
+});
+</script>
+</body>
+</html>
